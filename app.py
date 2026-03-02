@@ -10,6 +10,34 @@ import json
 import random
 import string
 import requests
+
+# =========================
+# IMÁGENES (descarga con headers para evitar 403 de CDNs)
+# =========================
+@st.cache_data(show_spinner=False, ttl=24*3600)
+def fetch_image_bytes(url: str) -> bytes | None:
+    url = (url or '').strip()
+    if not url:
+        return None
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+            'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8',
+            'Referer': 'https://www.google.com/',
+        }
+        r = requests.get(url, headers=headers, timeout=12, allow_redirects=True)
+        if r.status_code != 200:
+            return None
+        ctype = (r.headers.get('content-type') or '').lower()
+        if 'image' not in ctype and not url.lower().endswith(('.jpg','.jpeg','.png','.webp','.gif')):
+            # a veces devuelve HTML
+            return None
+        return r.content
+    except Exception:
+        return None
+
+
 from contextlib import contextmanager
 # =========================
 # CONFIG
@@ -2312,10 +2340,18 @@ def page_picking():
     except Exception:
         pics, pub_link = [], ""
     if pics:
-        st.image(pics[0], use_container_width=True)
+        imgb = fetch_image_bytes(pics[0])
+        if imgb:
+            st.image(imgb, use_container_width=True)
+        else:
+            st.image(pics[0], use_container_width=True)
         if len(pics) > 1:
             with st.expander(f"Ver más fotos ({len(pics)})", expanded=False):
-                st.image(pics, use_container_width=True)
+                imgs_bytes = []
+                    for u in pics[:6]:
+                        b = fetch_image_bytes(u)
+                        imgs_bytes.append(b if b else u)
+                    st.image(imgs_bytes, use_container_width=True)
 
     st.markdown(f"### Solicitado: {qty_total}")
 
@@ -4858,7 +4894,11 @@ def page_sorting_camarero(inv_map_sku, barcode_to_sku):
             except Exception:
                 pics, _pub_link = [], ""
             if pics:
-                st.image(pics[0], use_container_width=True)
+                imgb = fetch_image_bytes(pics[0])
+        if imgb:
+            st.image(imgb, use_container_width=True)
+        else:
+            st.image(pics[0], use_container_width=True)
             else:
                 st.caption("Sin imagen disponible")
 
