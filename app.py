@@ -58,8 +58,8 @@ CORTES_FILE = "CORTES.xlsx"
 
 # Links de publicaciones (SKU -> item/link/fotos)
 # Debe estar en el repo, en la misma carpeta que app.py
-PUBLICATIONS_FILE = "links de publicaciones.xlsx"
-
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PUBLICATIONS_FILE = os.path.join(BASE_DIR, "links de publicaciones.xlsx")
 # =========================
 # SFX (Sistema A: CLICK + OK/ERR) — estable para Chrome/Android
 # =========================
@@ -1263,16 +1263,42 @@ def get_publication_row(sku: str) -> dict:
         return {}
     return {"sku_ml": row[0], "ml_item_id": row[1], "title": row[2], "link": row[3], "updated_at": row[4]}
 
-OG_IMAGE_RE = re.compile(
-    r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+OG_IMAGE_RE_1 = re.compile(
+    r'<meta[^>]+(?:property|name)=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']',
+    re.IGNORECASE
+)
+OG_IMAGE_RE_2 = re.compile(
+    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']og:image(?::secure_url)?["\']',
+    re.IGNORECASE
+)
+TWITTER_IMAGE_RE_1 = re.compile(
+    r'<meta[^>]+(?:property|name)=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)["\']',
+    re.IGNORECASE
+)
+TWITTER_IMAGE_RE_2 = re.compile(
+    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']twitter:image(?::src)?["\']',
     re.IGNORECASE
 )
 
+def _extract_main_image_from_html(html_text: str) -> str:
+    """Extrae una URL de imagen principal desde HTML sin depender de un único formato.
+
+    Prioridad: og:image (incluye secure_url) -> twitter:image.
+    """
+    if not html_text:
+        return ""
+    for rx in (OG_IMAGE_RE_1, OG_IMAGE_RE_2, TWITTER_IMAGE_RE_1, TWITTER_IMAGE_RE_2):
+        m = rx.search(html_text)
+        if m:
+            return (m.group(1) or "").strip()
+    return ""
+
+
 @st.cache_data(show_spinner=False, ttl=24*3600)
 def publication_main_image_from_html(link: str) -> str:
-    """Devuelve 1 URL de imagen principal leyendo og:image desde el HTML de la publicación.
+    """Devuelve 1 URL de imagen principal leyendo metatags desde el HTML.
 
-    Sin API: solo usa el link público de Mercado Libre.
+    Sin API: usa el link público de la publicación (puede fallar si ML bloquea el request).
     """
     url = (link or "").strip()
     if not url:
@@ -1280,16 +1306,22 @@ def publication_main_image_from_html(link: str) -> str:
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            # Referer ayuda a evitar ciertos bloqueos básicos
+            "Referer": "https://www.google.com/",
         }
-        r = requests.get(url, headers=headers, timeout=8, allow_redirects=True)
+        r = requests.get(url, headers=headers, timeout=12, allow_redirects=True)
         if r.status_code != 200:
             return ""
         html_text = r.text or ""
-        m = OG_IMAGE_RE.search(html_text)
-        return m.group(1).strip() if m else ""
+        return _extract_main_image_from_html(html_text)
     except Exception:
         return ""
+
+
 
 def get_picture_urls_for_sku(sku: str) -> tuple[list[str], str]:
     """Retorna (urls, link_publicacion).
