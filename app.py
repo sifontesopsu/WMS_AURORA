@@ -1183,20 +1183,26 @@ def extract_ml_item_id(value: str) -> str:
     return prefix
 
 def import_publication_links_excel(file) -> pd.DataFrame:
-    """Lee Excel de publicaciones con columnas tipo:
-    Id, SKU, Título, Link, Imagen, ImgStatus (tolerante en nombres).
+    """Lee Excel con columnas SKU + Link + Imagen (tolerante).
 
-    La app usa directamente la URL de imagen (Imagen / image_url) y NO hace scraping.
+    Acepta nombres comunes:
+      - SKU: sku, codigo, código, sku_ml
+      - Link: link, url, enlace
+      - Imagen: imagen, image_url, image, foto, picture
+      - Título: título, titulo, title
+      - Id: id, item, item_id, ml_item_id (opcional)
     """
     df = pd.read_excel(file, dtype=str)
 
+    # normalizar headers
     cols = {str(c).strip().lower(): c for c in df.columns}
 
     sku_c = cols.get("sku") or cols.get("codigo") or cols.get("código") or cols.get("sku_ml")
     id_c = cols.get("id") or cols.get("item") or cols.get("item_id") or cols.get("ml_item_id")
     title_c = cols.get("título") or cols.get("titulo") or cols.get("title")
     link_c = cols.get("link") or cols.get("url") or cols.get("enlace")
-    img_c = cols.get("imagen") or cols.get("image_url") or cols.get("image") or cols.get("foto") or cols.get("img")
+    img_c = (cols.get("imagen") or cols.get("image_url") or cols.get("image") or
+             cols.get("foto") or cols.get("picture") or cols.get("img") or cols.get("img_url"))
 
     if not sku_c:
         raise ValueError("No encuentro columna SKU en el Excel.")
@@ -1207,8 +1213,6 @@ def import_publication_links_excel(file) -> pd.DataFrame:
     out["sku_ml"] = df[sku_c].astype(str).map(normalize_sku)
     out["title"] = df[title_c].astype(str).fillna("").map(lambda x: str(x).strip()) if title_c else ""
     out["link"] = df[link_c].astype(str).fillna("").map(lambda x: str(x).strip()) if link_c else ""
-
-    # URL de imagen (columna resuelta por tu script Selenium)
     out["image_url"] = df[img_c].astype(str).fillna("").map(lambda x: str(x).strip()) if img_c else ""
 
     # item id: preferir Id, si no, extraer desde link
@@ -1225,7 +1229,7 @@ def import_publication_links_excel(file) -> pd.DataFrame:
     return out[["sku_ml", "ml_item_id", "title", "link", "image_url"]]
 
 def upsert_publications_to_db(df_pub: pd.DataFrame) -> tuple[int, int]:
-    """Inserta/actualiza tabla sku_publications desde el Excel.
+    """Inserta/actualiza tabla sku_publications desde el Excel (SKU + link/id/título + imagen).
 
     Retorna (ok_count, missing_id_count).
     """
@@ -1338,21 +1342,17 @@ def publication_main_image_from_html(link: str) -> str:
 
 
 def get_picture_urls_for_sku(sku: str) -> tuple[list[str], str]:
-    """Retorna (urls, link_publicacion).
+    """Retorna (urls, link_publicacion) usando el Excel links_con_imagenes.xlsx.
 
-    Nuevo modo estable: usa directamente la URL de imagen guardada en la DB
-    (cargada desde links_con_imagenes.xlsx). No hace scraping ni requests a ML.
+    No hace scraping ni requests a Mercado Libre.
     """
     row = get_publication_row(sku)
     if not row:
         return [], ""
-
     link = (row.get("link") or "").strip()
     img = (row.get("image_url") or "").strip()
-
     urls = [img] if img else []
     return urls, link
-
 
 # =========================
 # CORTES (lista de SKUs)
