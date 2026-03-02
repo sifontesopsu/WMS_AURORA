@@ -4217,6 +4217,77 @@ def _s2_upsert_control(mid: int, pdf_name: str, pdf_bytes: bytes):
 
 
 
+def _s2_get_max_page(mid: int) -> int:
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT MAX(page_no) FROM s2_sales WHERE manifest_id=?;", (mid,))
+    v = c.fetchone()[0]
+    conn.close()
+    try:
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
+def _s2_append_control(mid: int, pdf_name: str, pdf_bytes: bytes, page_offset: int = 0) -> int:
+    """Append a control PDF into an existing manifest, offsetting page numbers to avoid mixing."""
+    pages_sales = _s2_parse_control_pdf(pdf_bytes)
+    conn = get_conn()
+    c = conn.cursor()
+
+    n_sales = 0
+    page_counters = {}
+    for s in pages_sales:
+        sale_id = str(s.get("sale_id") or "")
+        if not sale_id:
+            continue
+        n_sales += 1
+        shipment_id = s.get("shipment_id")
+        raw_page_no = int(s.get("page_no") or 1)
+        page_no = int(raw_page_no + int(page_offset or 0))
+        pack_id = s.get("pack_id")
+        row_no = int(page_counters.get(page_no, 0) + 1)
+        page_counters[page_no] = row_no
+        customer = _s2_clean_person_text(s.get("customer"), 70)
+        destino = _s2_clean_person_text(s.get("destino"), 80)
+
+        c.execute("""INSERT INTO s2_sales(manifest_id, sale_id, shipment_id, page_no, row_no, status, pack_id, customer, destino)
+                     VALUES(?,?,?,?,?, 'NEW', ?, ?, ?)
+                     ON CONFLICT(manifest_id, sale_id) DO UPDATE SET
+                        shipment_id=excluded.shipment_id,
+                        page_no=excluded.page_no,
+                        status='NEW',
+                        mesa=NULL,
+                        opened_at=NULL,
+                        closed_at=NULL,
+                        pack_id=excluded.pack_id,
+                        customer=excluded.customer,
+                        destino=excluded.destino;""",
+                  (mid, sale_id, (str(shipment_id) if shipment_id else None), page_no, row_no,
+                   (str(pack_id) if pack_id else None), (str(customer) if customer else None),
+                   (str(destino) if destino else None)))
+
+        for it in s.get("items", []):
+            try:
+                sku = str(it.get("sku"))
+                qty = int(it.get("qty") or 0)
+            except Exception:
+                continue
+            if not sku or qty <= 0:
+                continue
+            c.execute("""INSERT INTO s2_items(manifest_id, sale_id, sku, description, qty, picked, status)
+                         VALUES(?,?,?,?,?,0,'PENDING')
+                         ON CONFLICT(manifest_id, sale_id, sku) DO UPDATE SET
+                            description=excluded.description,
+                            qty=excluded.qty,
+                            picked=0,
+                            status='PENDING';""", (mid, sale_id, sku, it.get("desc",""), qty))
+
+    conn.commit()
+    conn.close()
+    return n_sales
+
+
 
 def _s2_upsert_labels(mid: int, labels_name: str, labels_bytes: bytes):
     # Detectar ship ids y relaciones pack/venta -> ship
@@ -4468,8 +4539,7 @@ def _s2_reset_all_sorting():
     """Hard reset of Sorting module only (keeps other modules intact)."""
     conn = get_conn()
     c = conn.cursor()
-
-    # All Sorting v2 tables (s2_*)
+    # New (s2_*) tables (some deployments may not have all of them yet)
     s2_tables = [
         "s2_page_assign",
         "s2_pack_ship",
@@ -4481,16 +4551,15 @@ def _s2_reset_all_sorting():
         "s2_packing",
         "s2_dispatch",
     ]
-
     for t in s2_tables:
         try:
             c.execute(f"DELETE FROM {t};")
         except Exception:
-            # If a table doesn't exist (older DB), skip safely
+            # table may not exist in older DBs
             pass
-
     conn.commit()
     conn.close()
+
 
 def _s2_get_pages(mid:int):
     conn=get_conn()
@@ -4651,24 +4720,30 @@ def page_sorting_upload(inv_map_sku, barcode_to_sku):
     if lock_control:
         st.warning("🔒 Ya hay un Control cargado en el manifiesto activo. Para cargar un manifiesto nuevo debes **Cerrar** o **Reiniciar** el Sorting desde Administrador.")
 
-    # --- Carga de archivos (1 a 1 o en lote) ---
-    upload_mode = st.radio(
+    
+    mode = st.radio(
         "Modo de carga",
-        options=["Uno", "Varios (lote)"],
+        ["Uno (1 Control + 1 Etiquetas)", "Varios (lote: varios Controles + varias Etiquetas)"],
         horizontal=True,
         key="s2_upload_mode",
-        disabled=lock_control,
-        help="En modo lote puedes subir varios Controles (PDF) y varios archivos de Etiquetas (TXT/ZPL). Se importan por pares en el orden elegido.",
     )
 
-    if upload_mode == "Uno":
+    if mode.startswith("Uno"):
         col1, col2 = st.columns(2)
         with col1:
             pdf = st.file_uploader("Control (PDF)", type=["pdf"], key="s2_control_pdf", disabled=lock_control)
         with col2:
-            zpl = st.file_uploader("Etiquetas de envío (TXT/ZPL)", type=["txt","zpl"], key="s2_labels_txt")
+            zpl = st.file_uploader("Etiquetas de envío (TXT/ZPL)", type=["txt", "zpl"], key="s2_labels_txt")
 
         if pdf is not None:
+            # Limpia asignaciones de páginas previas (por si el manifiesto se reutiliza)
+            conn = get_conn()
+            c = conn.cursor()
+            c.execute("DELETE FROM s2_page_assign WHERE manifest_id=?;", (mid,))
+            c.execute("DELETE FROM s2_pack_ship WHERE manifest_id=?;", (mid,))
+            conn.commit()
+            conn.close()
+
             n_sales = _s2_upsert_control(mid, getattr(pdf, "name", "control.pdf"), pdf.getvalue())
             st.success(f"Control cargado. Ventas detectadas: {n_sales}")
             _s2_auto_assign_pages(mid, num_mesas=10)
@@ -4678,11 +4753,11 @@ def page_sorting_upload(inv_map_sku, barcode_to_sku):
             st.success(f"Etiquetas cargadas. IDs detectados: {n_labels}")
 
     else:
-        st.info("📦 Lote: sube varios pares Control+Etiquetas. Se importarán **en orden** y se crearán manifiestos nuevos automáticamente.")
+        st.info("📦 Lote: se suman las páginas de todos los Controles (sin mezclar). Ej: 5 + 5 => 10 páginas para asignar a mesas.")
         col1, col2 = st.columns(2)
         with col1:
             pdfs = st.file_uploader(
-                "Controles (PDF) — múltiples",
+                "Controles (PDF) — puedes subir varios",
                 type=["pdf"],
                 accept_multiple_files=True,
                 key="s2_control_pdfs",
@@ -4690,51 +4765,79 @@ def page_sorting_upload(inv_map_sku, barcode_to_sku):
             )
         with col2:
             zpls = st.file_uploader(
-                "Etiquetas (TXT/ZPL) — múltiples",
-                type=["txt","zpl"],
+                "Etiquetas (TXT/ZPL) — puedes subir varios",
+                type=["txt", "zpl"],
                 accept_multiple_files=True,
                 key="s2_labels_txts",
-                disabled=lock_control,
             )
 
-        n_pdfs = len(pdfs or [])
-        n_zpls = len(zpls or [])
-        n_pairs = min(n_pdfs, n_zpls)
+        do_batch = st.button(
+            "Procesar lote en una sola tanda",
+            type="primary",
+            disabled=lock_control or (not pdfs and not zpls),
+            key="s2_do_batch",
+        )
 
-        if n_pdfs or n_zpls:
-            st.caption(f"Seleccionados: {n_pdfs} Control(es) · {n_zpls} Etiqueta(s) · Se importarán {n_pairs} par(es).")
-            if n_pdfs != n_zpls:
-                st.warning("⚠️ Cantidades distintas: se importarán solo los pares completos según el orden. Los archivos sobrantes se ignorarán.")
+        if do_batch:
+            # Limpieza dura del manifiesto activo (solo datos del Sorting v2 del manifiesto)
+            conn = get_conn()
+            c = conn.cursor()
+            c.execute("DELETE FROM s2_page_assign WHERE manifest_id=?;", (mid,))
+            c.execute("DELETE FROM s2_pack_ship WHERE manifest_id=?;", (mid,))
+            c.execute("DELETE FROM s2_labels WHERE manifest_id=?;", (mid,))
+            c.execute("DELETE FROM s2_items WHERE manifest_id=?;", (mid,))
+            c.execute("DELETE FROM s2_sales WHERE manifest_id=?;", (mid,))
+            conn.commit()
+            conn.close()
 
-        if st.button(f"📥 Importar lote ({n_pairs} pares)", use_container_width=True, disabled=(n_pairs <= 0 or lock_control), key="s2_import_batch"):
-            cur_mid = mid
-            imported = 0
-            for i in range(n_pairs):
-                pdf = (pdfs or [])[i]
-                zpl = (zpls or [])[i]
+            # 1) Controles: append con offset de páginas
+            total_sales = 0
+            if pdfs:
+                offset = 0
+                names = []
+                for i, pdf in enumerate(pdfs):
+                    names.append(getattr(pdf, "name", f"control_{i+1}.pdf"))
+                    added = _s2_append_control(mid, names[-1], pdf.getvalue(), page_offset=offset)
+                    total_sales += int(added or 0)
+                    offset = _s2_get_max_page(mid)
 
-                n_sales = _s2_upsert_control(cur_mid, getattr(pdf, "name", "control.pdf"), pdf.getvalue())
-                n_labels = _s2_upsert_labels(cur_mid, getattr(zpl, "name", "etiquetas.txt"), zpl.getvalue())
-                _s2_auto_assign_pages(cur_mid, num_mesas=10)
-                _ = _s2_create_corridas(cur_mid)
-
-                imported += 1
-
-                # Si vienen más pares, cerramos este manifiesto y creamos el siguiente
-                if i < n_pairs - 1:
-                    _s2_close_manifest(cur_mid)
-                    cur_mid = _s2_create_new_manifest()
-
-            # limpiar para evitar reimport al rerun
-            for k in ("s2_control_pdfs", "s2_labels_txts", "s2_control_pdf", "s2_labels_txt"):
+                # Guarda referencia del lote en s2_files (solo como registro)
                 try:
-                    if k in st.session_state:
-                        del st.session_state[k]
+                    first_pdf = pdfs[0].getvalue()
                 except Exception:
-                    pass
+                    first_pdf = None
+                conn = get_conn()
+                c = conn.cursor()
+                c.execute(
+                    """INSERT INTO s2_files(manifest_id, control_pdf, control_name, updated_at)
+                         VALUES(?, ?, ?, ?)
+                         ON CONFLICT(manifest_id) DO UPDATE SET
+                            control_pdf=excluded.control_pdf,
+                            control_name=excluded.control_name,
+                            updated_at=excluded.updated_at;""",
+                    (mid, first_pdf, "LOTE: " + " + ".join(names), _s2_now_iso()),
+                )
+                conn.commit()
+                conn.close()
 
-            st.success(f"✅ Lote importado: {imported} manifiesto(s). Manifiesto activo actual: {cur_mid}")
-            st.rerun()
+                st.success(f"Controles procesados en lote. Ventas totales detectadas: {total_sales}")
+                _s2_auto_assign_pages(mid, num_mesas=10)
+
+            # 2) Etiquetas: concatenar y cargar 1 sola vez
+            if zpls:
+                parts = []
+                zpl_names = []
+                for i, z in enumerate(zpls):
+                    zpl_names.append(getattr(z, "name", f"etiquetas_{i+1}.txt"))
+                    try:
+                        parts.append(z.getvalue())
+                    except Exception:
+                        pass
+                labels_bytes = b"\n\n".join([p for p in parts if p])
+                n_labels = _s2_upsert_labels(mid, "LOTE: " + " + ".join(zpl_names), labels_bytes)
+                st.success(f"Etiquetas procesadas en lote. IDs detectados: {n_labels}")
+
+    # Resumen
 
     # Resumen (para evitar confusión: ventas y etiquetas NO siempre coinciden 1:1)
     stats = _s2_get_stats(mid)
