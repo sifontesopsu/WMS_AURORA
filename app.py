@@ -4468,7 +4468,8 @@ def _s2_reset_all_sorting():
     """Hard reset of Sorting module only (keeps other modules intact)."""
     conn = get_conn()
     c = conn.cursor()
-    # New (s2_*) tables
+
+    # All Sorting v2 tables (s2_*)
     s2_tables = [
         "s2_page_assign",
         "s2_pack_ship",
@@ -4477,10 +4478,19 @@ def _s2_reset_all_sorting():
         "s2_sales",
         "s2_files",
         "s2_manifests",
+        "s2_packing",
+        "s2_dispatch",
     ]
-    for t in s2_tables:
-        c.execute(f"DELETE FROM {t};")
 
+    for t in s2_tables:
+        try:
+            c.execute(f"DELETE FROM {t};")
+        except Exception:
+            # If a table doesn't exist (older DB), skip safely
+            pass
+
+    conn.commit()
+    conn.close()
 
 def _s2_get_pages(mid:int):
     conn=get_conn()
