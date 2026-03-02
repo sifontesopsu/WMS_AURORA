@@ -21,6 +21,91 @@ def ddg_images_first_urls(query: str, max_results: int = 4) -> list[str]:
     q = (query or "").strip()
     if not q:
         return []
+
+# =========================
+# FALLBACK 2: Bing Images (scraping liviano, sin API)
+# =========================
+_BING_MURL_RE = re.compile(r'"murl"\s*:\s*"([^"]+)"', re.IGNORECASE)
+_BING_ENC_MURL_RE = re.compile(r'murl\\u003a\\u0022([^\\]+?)\\u0022', re.IGNORECASE)
+
+@st.cache_data(show_spinner=False, ttl=6*3600)
+def bing_images_first_urls(query: str, max_results: int = 4) -> list[str]:
+    """Busca imágenes en Bing y retorna URLs directas (best-effort)."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+        url = "https://www.bing.com/images/search?" + urllib.parse.urlencode({"q": q, "form": "HDRSC2", "first": "1"})
+        r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        if r.status_code != 200:
+            return []
+        html0 = r.text or ""
+        urls = []
+
+        for mm in _BING_MURL_RE.finditer(html0):
+            u = (mm.group(1) or "").strip()
+            if u:
+                urls.append(u)
+            if len(urls) >= max_results * 3:
+                break
+
+        if not urls:
+            for mm in _BING_ENC_MURL_RE.finditer(html0):
+                u = (mm.group(1) or "").strip()
+                if u:
+                    u = u.replace("\\u002f", "/").replace("\\u003a", ":").replace("\\u0026", "&")
+                    urls.append(u)
+                if len(urls) >= max_results * 3:
+                    break
+
+        out = []
+        seen = set()
+        for u in urls:
+            if u in seen:
+                continue
+            seen.add(u)
+            out.append(u)
+            if len(out) >= max_results:
+                break
+        return out
+    except Exception:
+        return []
+
+
+def image_search_debug_probe(queries: list[str], max_results: int = 6) -> dict:
+    """Diagnóstico simple de buscadores (DDG + Bing)."""
+    info = {"queries": [], "chosen": [], "provider": ""}
+    for q in queries:
+        ddg = ddg_images_first_urls(q, max_results=max_results)
+        ddg2 = _prefer_mlstatic(ddg, limit=max_results)
+        bing = bing_images_first_urls(q, max_results=max_results)
+        bing2 = _prefer_mlstatic(bing, limit=max_results)
+
+        info["queries"].append({
+            "q": q,
+            "ddg": len(ddg),
+            "ddg_top": (ddg2[0] if ddg2 else (ddg[0] if ddg else "")),
+            "bing": len(bing),
+            "bing_top": (bing2[0] if bing2 else (bing[0] if bing else "")),
+        })
+
+        if ddg2:
+            info["chosen"] = ddg2
+            info["provider"] = "duckduckgo"
+            break
+        if bing2:
+            info["chosen"] = bing2
+            info["provider"] = "bing"
+            break
+    return info
+
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
@@ -1600,7 +1685,7 @@ def get_picture_urls_for_sku(sku: str) -> tuple[list[str], str]:
     1) Busca link por SKU en tabla sku_publications.
     2) Intenta extraer URLs desde el HTML (og/twitter/mlstatic).
        - Si el HTML redirige a account-verification, normalmente no trae fotos del producto.
-    3) Fallback: buscar en DuckDuckGo Images usando el MLC-ID del link (o título/sku).
+    3) Fallback: buscadores (DuckDuckGo Images -> Bing Images) usando el MLC-ID del link.
     """
     row = get_publication_row(sku)
     if not row:
@@ -1612,15 +1697,26 @@ def get_picture_urls_for_sku(sku: str) -> tuple[list[str], str]:
 
     # 2) HTML de la publicación
     urls = publication_image_urls_from_html(link, limit=6) if link else []
+    urls = _prefer_mlstatic(urls, limit=6)
 
-    # Si el HTML no entregó nada útil, usamos búsqueda
+    # 3) Buscadores si no hay nada útil
     if not urls:
-        for q in _build_fallback_queries(link, sku=sku, title=title):
-            found = ddg_images_first_urls(q, max_results=6)
+        queries = _build_fallback_queries(link, sku=sku, title=title)
+
+        for q in queries:
+            found = ddg_images_first_urls(q, max_results=8)
             found = _prefer_mlstatic(found, limit=6)
             if found:
                 urls = found
                 break
+
+        if not urls:
+            for q in queries:
+                found = bing_images_first_urls(q, max_results=8)
+                found = _prefer_mlstatic(found, limit=6)
+                if found:
+                    urls = found
+                    break
 
     return urls, link
 
