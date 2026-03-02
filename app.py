@@ -2345,52 +2345,58 @@ def page_picking():
     except Exception:
         pics, pub_link = [], ""
     if pics:
-    if st.session_state.get("debug_images", False):
-        with st.expander("DEBUG IMÁGENES", expanded=True):
-            st.write({
-                "pics_count": len(pics),
-                "pics_first": pics[0] if pics else "",
-                "pub_link": pub_link,
-                "pub_links_status": st.session_state.get("_pub_links_status"),
-            })
-            # Diagnóstico rápido: ¿hay URL y se puede descargar bytes?
-            if pics:
-                b0 = fetch_image_bytes(pics[0])
-                st.write({
-                    "first_image_bytes_ok": bool(b0),
-                    "first_image_bytes_len": len(b0) if b0 else 0,
-                })
-            if pub_link:
-                try:
-                    headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                        "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
-                        "Referer": "https://www.google.com/",
-                    }
-                    rr = requests.get(pub_link, headers=headers, timeout=12, allow_redirects=True)
-                    st.write({
-                        "html_status": rr.status_code,
-                        "final_url": getattr(rr, "url", ""),
-                        "html_len": len(rr.text or ""),
-                    })
-                    if rr.status_code == 200:
-                        st.write({"extracted_image_from_html": _extract_main_image_from_html(rr.text or "")})
-                except Exception as e:
-                    st.write({"html_fetch_error": str(e)})
+        # Imagen principal (preferimos bytes con headers para evitar 403 de CDNs)
         imgb = fetch_image_bytes(pics[0])
         if imgb:
             st.image(imgb, use_container_width=True)
         else:
             st.image(pics[0], use_container_width=True)
+
+        # Debug opcional
+        if st.session_state.get("debug_images", False):
+            with st.expander("DEBUG IMÁGENES", expanded=True):
+                st.write({
+                    "pics_count": len(pics),
+                    "pics_first": pics[0] if pics else "",
+                    "pub_link": pub_link,
+                    "pub_links_status": st.session_state.get("_pub_links_status"),
+                })
+
+                b0 = fetch_image_bytes(pics[0]) if pics else None
+                st.write({
+                    "first_image_bytes_ok": bool(b0),
+                    "first_image_bytes_len": len(b0) if b0 else 0,
+                })
+
+                if pub_link:
+                    try:
+                        headers = {
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                            "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+                            "Referer": "https://www.google.com/",
+                        }
+                        rr = requests.get(pub_link, headers=headers, timeout=12, allow_redirects=True)
+                        st.write({
+                            "html_status": rr.status_code,
+                            "final_url": getattr(rr, "url", ""),
+                            "html_len": len(rr.text or ""),
+                        })
+                        if rr.status_code == 200:
+                            st.write({"extracted_image_from_html": _extract_main_image_from_html(rr.text or "")})
+                    except Exception as e:
+                        st.write({"html_fetch_error": str(e)})
+
+        # Más fotos
         if len(pics) > 1:
             with st.expander(f"Ver más fotos ({len(pics)})", expanded=False):
-    imgs_bytes = []
-    for u in pics[:6]:
-        b = fetch_image_bytes(u)
-        imgs_bytes.append(b if b else u)
-    st.image(imgs_bytes, use_container_width=True)
-
+                imgs_bytes = []
+                for u in pics[:6]:
+                    b = fetch_image_bytes(u)
+                    imgs_bytes.append(b if b else u)
+                st.image(imgs_bytes, use_container_width=True)
+    else:
+        st.caption("Sin imagen disponible")
     st.markdown(f"### Solicitado: {qty_total}")
 
     if s["scan_status"] == "ok":
