@@ -4641,20 +4641,90 @@ def page_sorting_upload(inv_map_sku, barcode_to_sku):
     if lock_control:
         st.warning("🔒 Ya hay un Control cargado en el manifiesto activo. Para cargar un manifiesto nuevo debes **Cerrar** o **Reiniciar** el Sorting desde Administrador.")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        pdf = st.file_uploader("Control (PDF)", type=["pdf"], key="s2_control_pdf", disabled=lock_control)
-    with col2:
-        zpl = st.file_uploader("Etiquetas de envío (TXT/ZPL)", type=["txt","zpl"], key="s2_labels_txt")
+    # --- Carga de archivos (1 a 1 o en lote) ---
+    upload_mode = st.radio(
+        "Modo de carga",
+        options=["Uno", "Varios (lote)"],
+        horizontal=True,
+        key="s2_upload_mode",
+        disabled=lock_control,
+        help="En modo lote puedes subir varios Controles (PDF) y varios archivos de Etiquetas (TXT/ZPL). Se importan por pares en el orden elegido.",
+    )
 
-    if pdf is not None:
-        n_sales = _s2_upsert_control(mid, getattr(pdf, "name", "control.pdf"), pdf.getvalue())
-        st.success(f"Control cargado. Ventas detectadas: {n_sales}")
-        _s2_auto_assign_pages(mid, num_mesas=10)
+    if upload_mode == "Uno":
+        col1, col2 = st.columns(2)
+        with col1:
+            pdf = st.file_uploader("Control (PDF)", type=["pdf"], key="s2_control_pdf", disabled=lock_control)
+        with col2:
+            zpl = st.file_uploader("Etiquetas de envío (TXT/ZPL)", type=["txt","zpl"], key="s2_labels_txt")
 
-    if zpl is not None:
-        n_labels = _s2_upsert_labels(mid, getattr(zpl, "name", "etiquetas.txt"), zpl.getvalue())
-        st.success(f"Etiquetas cargadas. IDs detectados: {n_labels}")
+        if pdf is not None:
+            n_sales = _s2_upsert_control(mid, getattr(pdf, "name", "control.pdf"), pdf.getvalue())
+            st.success(f"Control cargado. Ventas detectadas: {n_sales}")
+            _s2_auto_assign_pages(mid, num_mesas=10)
+
+        if zpl is not None:
+            n_labels = _s2_upsert_labels(mid, getattr(zpl, "name", "etiquetas.txt"), zpl.getvalue())
+            st.success(f"Etiquetas cargadas. IDs detectados: {n_labels}")
+
+    else:
+        st.info("📦 Lote: sube varios pares Control+Etiquetas. Se importarán **en orden** y se crearán manifiestos nuevos automáticamente.")
+        col1, col2 = st.columns(2)
+        with col1:
+            pdfs = st.file_uploader(
+                "Controles (PDF) — múltiples",
+                type=["pdf"],
+                accept_multiple_files=True,
+                key="s2_control_pdfs",
+                disabled=lock_control,
+            )
+        with col2:
+            zpls = st.file_uploader(
+                "Etiquetas (TXT/ZPL) — múltiples",
+                type=["txt","zpl"],
+                accept_multiple_files=True,
+                key="s2_labels_txts",
+                disabled=lock_control,
+            )
+
+        n_pdfs = len(pdfs or [])
+        n_zpls = len(zpls or [])
+        n_pairs = min(n_pdfs, n_zpls)
+
+        if n_pdfs or n_zpls:
+            st.caption(f"Seleccionados: {n_pdfs} Control(es) · {n_zpls} Etiqueta(s) · Se importarán {n_pairs} par(es).")
+            if n_pdfs != n_zpls:
+                st.warning("⚠️ Cantidades distintas: se importarán solo los pares completos según el orden. Los archivos sobrantes se ignorarán.")
+
+        if st.button(f"📥 Importar lote ({n_pairs} pares)", use_container_width=True, disabled=(n_pairs <= 0 or lock_control), key="s2_import_batch"):
+            cur_mid = mid
+            imported = 0
+            for i in range(n_pairs):
+                pdf = (pdfs or [])[i]
+                zpl = (zpls or [])[i]
+
+                n_sales = _s2_upsert_control(cur_mid, getattr(pdf, "name", "control.pdf"), pdf.getvalue())
+                n_labels = _s2_upsert_labels(cur_mid, getattr(zpl, "name", "etiquetas.txt"), zpl.getvalue())
+                _s2_auto_assign_pages(cur_mid, num_mesas=10)
+                _ = _s2_create_corridas(cur_mid)
+
+                imported += 1
+
+                # Si vienen más pares, cerramos este manifiesto y creamos el siguiente
+                if i < n_pairs - 1:
+                    _s2_close_manifest(cur_mid)
+                    cur_mid = _s2_create_new_manifest()
+
+            # limpiar para evitar reimport al rerun
+            for k in ("s2_control_pdfs", "s2_labels_txts", "s2_control_pdf", "s2_labels_txt"):
+                try:
+                    if k in st.session_state:
+                        del st.session_state[k]
+                except Exception:
+                    pass
+
+            st.success(f"✅ Lote importado: {imported} manifiesto(s). Manifiesto activo actual: {cur_mid}")
+            st.rerun()
 
     # Resumen (para evitar confusión: ventas y etiquetas NO siempre coinciden 1:1)
     stats = _s2_get_stats(mid)
