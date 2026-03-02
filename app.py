@@ -1313,18 +1313,69 @@ TWITTER_IMAGE_RE_2 = re.compile(
     re.IGNORECASE
 )
 
-def _extract_main_image_from_html(html_text: str) -> str:
-    """Extrae una URL de imagen principal desde HTML sin depender de un único formato.
+MLSTATIC_IMG_RE = re.compile(
+    r'(?:(?:https?:)?//)?(?:http2\.)?mlstatic\.com/[^"\'\s>]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\'\s>]*)?',
+    re.IGNORECASE
+)
 
-    Prioridad: og:image (incluye secure_url) -> twitter:image.
+def _extract_image_urls_from_html(html_text: str, limit: int = 6) -> list[str]:
+    """Extrae URLs de imágenes desde HTML (sin API).
+
+    Estrategia:
+    1) og:image / og:image:secure_url
+    2) twitter:image
+    3) fallback: cualquier URL de mlstatic dentro del HTML (scripts incluidos)
     """
     if not html_text:
-        return ""
+        return []
+    # des-escape (&amp; etc.)
+    try:
+        txt = html.unescape(html_text)
+    except Exception:
+        txt = html_text
+
+    urls: list[str] = []
+
+    # 1) metas OG/Twitter (prioridad)
     for rx in (OG_IMAGE_RE_1, OG_IMAGE_RE_2, TWITTER_IMAGE_RE_1, TWITTER_IMAGE_RE_2):
-        m = rx.search(html_text)
+        m = rx.search(txt)
         if m:
-            return (m.group(1) or "").strip()
-    return ""
+            u = (m.group(1) or "").strip()
+            if u:
+                urls.append(u)
+                break
+
+    # 2) fallback: buscar imágenes mlstatic (pueden venir en JSON embebido)
+    try:
+        found = MLSTATIC_IMG_RE.findall(txt)
+    except Exception:
+        found = []
+
+    # normalizar y deduplicar preservando orden
+    seen = set()
+    out: list[str] = []
+    for u in urls + list(found):
+        if not u:
+            continue
+        u = u.strip()
+        if u.startswith("//"):
+            u = "https:" + u
+        if u.lower().startswith("http://"):
+            # preferir https si es posible
+            u = "https://" + u[len("http://"):]
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+        if len(out) >= limit:
+            break
+
+    return out
+
+def _extract_main_image_from_html(html_text: str) -> str:
+    """Extrae 1 URL principal desde HTML."""
+    urls = _extract_image_urls_from_html(html_text, limit=1)
+    return urls[0] if urls else ""
 
 
 @st.cache_data(show_spinner=False, ttl=24*3600)
@@ -1355,11 +1406,37 @@ def publication_main_image_from_html(link: str) -> str:
         return ""
 
 
+@st.cache_data(show_spinner=False, ttl=24*3600)
+def publication_image_urls_from_html(link: str, limit: int = 6) -> list[str]:
+    """Devuelve una lista de URLs de imágenes encontradas en el HTML de la publicación."""
+    url = (link or "").strip()
+    if not url:
+        return []
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "es-CL,es;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "Referer": "https://www.google.com/",
+        }
+        r = requests.get(url, headers=headers, timeout=12, allow_redirects=True)
+        if r.status_code != 200:
+            return []
+        return _extract_image_urls_from_html(r.text or "", limit=limit)
+    except Exception:
+        return []
+
+
+
 
 def get_picture_urls_for_sku(sku: str) -> tuple[list[str], str]:
     """Retorna (urls, link_publicacion).
 
-    Modo 'parche' (sin API): usa og:image del HTML para obtener la foto principal.
+    Sin API:
+    - Busca el link de la publicación por SKU en tabla sku_publications.
+    - Descarga el HTML y extrae og:image / twitter:image / fallback mlstatic.
     """
     row = get_publication_row(sku)
     if not row:
@@ -1367,9 +1444,9 @@ def get_picture_urls_for_sku(sku: str) -> tuple[list[str], str]:
     link = (row.get("link") or "").strip()
     if not link:
         return [], ""
-    img = publication_main_image_from_html(link)
-    urls = [img] if img else []
-    return urls, link# =========================
+    urls = publication_image_urls_from_html(link, limit=6)
+    return urls, link
+# =========================
 # CORTES (lista de SKUs)
 # =========================
 def load_cortes_set(path: str = CORTES_FILE) -> set:
