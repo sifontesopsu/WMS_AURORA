@@ -1795,6 +1795,7 @@ def save_orders_and_build_ots(
 
     # título ML preferido por SKU (si no hay título técnico)
     title_ml_by_sku = {}
+    _fam_prefix6 = {}  # prefijo6 -> familia (para packs sin familia)
     if "title_ml" in dfw.columns:
         for sku, g in dfw.groupby("sku_ml"):
             t = ""
@@ -1805,10 +1806,8 @@ def save_orders_and_build_ots(
                     break
             title_ml_by_sku[sku] = t
 
-        # Prefijos (primeros 6 dígitos) para inferir packs sin Familia
-        # Idea: si un SKU no trae Familia en el maestro (típico en packs),
-        # buscamos una Familia por match de prefijo de 6 dígitos contra SKUs base con Familia.
-        _fam_prefix6 = {}
+        # Prefijos (primeros 6 dígitos) para inferir packs sin Familia (packs)
+        # Construimos un índice prefijo6 -> familia usando SKUs del maestro que SÍ traen familia.
         try:
             for k, v in (familia_map_sku or {}).items():
                 base_sku = normalize_sku(k)
@@ -1818,14 +1817,11 @@ def save_orders_and_build_ots(
                 if len(base_sku) < 6:
                     continue
                 p6 = base_sku[:6]
-                # Si hay colisión de familias en el mismo prefijo, mantenemos la primera encontrada
-                # (en la práctica, tus SKUs base por prefijo debieran ser consistentes).
-                if p6 not in _fam_prefix6:
+                if p6 and p6 not in _fam_prefix6:
                     _fam_prefix6[p6] = fam
         except Exception:
             _fam_prefix6 = {}
-
-        def _fam_for_sku(sku: str) -> str:
+    def _fam_for_sku(sku: str) -> str:
             # 1) Familia directa en maestro
             f = str(familia_map_sku.get(sku, "") or "").strip()
             if f and f.lower() != "nan":
