@@ -3479,6 +3479,45 @@ def page_admin():
                 other_picker_names = [n for n in picker_names if n != src_name]
                 if not other_picker_names:
                     st.warning("No hay pickeadores destino disponibles.")
+                    with st.expander("➕ Agregar pickeadores destino"):
+                        add_n = st.number_input(
+                            "Cuántos pickeadores quieres agregar",
+                            min_value=1, max_value=10, value=1, step=1,
+                            key="adm_add_pickers_n"
+                        )
+                        if st.button("Crear pickeadores", key="adm_add_pickers_btn"):
+                            try:
+                                # Calcula el siguiente P# disponible
+                                nums = []
+                                for _n in picker_names:
+                                    _s = str(_n).strip()
+                                    if _s.startswith("P") and _s[1:].isdigit():
+                                        nums.append(int(_s[1:]))
+                                next_i = (max(nums) + 1) if nums else 1
+
+                                created = 0
+                                for k in range(int(add_n)):
+                                    new_name = f"P{next_i + k}"
+                                    try:
+                                        c.execute("INSERT INTO pickers (name) VALUES (?)", (new_name,))
+                                        created += 1
+                                    except Exception:
+                                        # Si ya existe (UNIQUE), lo saltamos sin romper el flujo
+                                        pass
+
+                                if created > 0:
+                                    conn.commit()
+                                    sfx_emit("OK")
+                                    st.success(f"Se crearon {created} pickeadores. Ya puedes repartir tareas.")
+                                    st.rerun()
+                                else:
+                                    conn.rollback()
+                                    sfx_emit("ERR")
+                                    st.error("No se creó ningún pickeador nuevo (puede que ya existan).")
+                            except Exception as e:
+                                conn.rollback()
+                                sfx_emit("ERR")
+                                st.error(f"No se pudo crear pickeadores: {e}")
                 else:
                     dests = st.multiselect("Pickeadores destino", other_picker_names, default=other_picker_names, key="adm_reassign_dests")
                     if not dests:
