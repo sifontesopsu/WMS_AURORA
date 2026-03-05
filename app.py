@@ -1797,7 +1797,6 @@ def save_orders_and_build_ots(
     dfw = sales_df.copy()
     dfw["sku_ml"] = dfw["sku_ml"].map(normalize_sku)
     dfw = dfw[dfw["sku_ml"].ne("")].copy()
-
     # título ML preferido por SKU (si no hay título técnico)
     title_ml_by_sku = {}
     if "title_ml" in dfw.columns:
@@ -1810,34 +1809,51 @@ def save_orders_and_build_ots(
                     break
             title_ml_by_sku[sku] = t
 
-        # Prefijos (SKU base -> Familia) para inferir packs sin Familia (prefijo más largo)
-        _fam_bases = []
-        try:
-            _fam_bases = [
-                (normalize_sku(k), str(v).strip())
-                for k, v in (familia_map_sku or {}).items()
-                if str(v or "").strip() and str(v).strip().lower() != "nan"
-            ]
-            # Evitar prefijos demasiado cortos que podrían mezclar familias
-            _fam_bases = [(k, v) for k, v in _fam_bases if k and len(k) >= 4]
-            _fam_bases.sort(key=lambda kv: len(kv[0]), reverse=True)
-        except Exception:
-            _fam_bases = []
-    def _fam_for_sku(sku: str) -> str:
-            # 1) Familia directa en maestro
-            f = str(familia_map_sku.get(sku, "") or "").strip()
-            if f and f.lower() != "nan":
-                return f
+    # --- Inferencia de familia para packs SIN familia ---
+    # Regla Aurora: los packs comparten los primeros dígitos con el SKU base que sí tiene familia.
+    # Para ser quirúrgicos, NO tocamos nada de lectura de códigos de barra; solo etiquetamos/ordenamos.
+    PREFIX_LEN = 5  # ajustable si en tu maestro se comporta mejor con 4/6
 
-            # 2) Fallback: inferir por "prefijo más largo" (packs)
-            # Busca un SKU base del maestro (con familia) que sea prefijo del SKU actual.
-            ssku = normalize_sku(sku)
-            if not ssku:
-                return "Sin Familia"
-            for base_sku, base_fam in _fam_bases:
-                if ssku != base_sku and ssku.startswith(base_sku):
-                    return base_fam
+    # Mapa prefijo -> familia (elige la familia más frecuente en ese prefijo)
+    _prefix_counts: dict[str, dict[str, int]] = {}
+    for _sku_base, _fam in (familia_map_sku or {}).items():
+        _s = normalize_sku(_sku_base)
+        _f = str(_fam or "").strip()
+        if not _s or not _f or _f.lower() == "nan":
+            continue
+        _p = _s[:PREFIX_LEN] if len(_s) >= PREFIX_LEN else _s
+        _prefix_counts.setdefault(_p, {})
+        _prefix_counts[_p][_f] = _prefix_counts[_p].get(_f, 0) + 1
+
+    _prefix_to_family: dict[str, str] = {}
+    for _p, _fd in _prefix_counts.items():
+        try:
+            _prefix_to_family[_p] = max(_fd.items(), key=lambda kv: kv[1])[0]
+        except Exception:
+            pass
+
+    def _fam_for_sku(sku: str) -> str:
+        # 1) Familia directa en maestro
+        f = str((familia_map_sku or {}).get(sku, "") or "").strip()
+        if f and f.lower() != "nan":
+            return f
+
+        # 2) Fallback: por prefijo (packs)
+        ssku = normalize_sku(sku)
+        if not ssku:
             return "Sin Familia"
+
+        p = ssku[:PREFIX_LEN] if len(ssku) >= PREFIX_LEN else ssku
+        if p in _prefix_to_family:
+            return _prefix_to_family[p]
+
+        # 3) Fallback extra: probar prefijos más cortos (evita dejar packs al final)
+        for L in range(min(PREFIX_LEN - 1, len(ssku)), 2, -1):
+            p2 = ssku[:L]
+            if p2 in _prefix_to_family:
+                return _prefix_to_family[p2]
+
+        return "Sin Familia"
 
     dfw["family"] = dfw["sku_ml"].map(_fam_for_sku)
 
