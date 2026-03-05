@@ -3464,31 +3464,34 @@ def page_admin():
                 if not other_picker_names:
                     st.warning("No hay pickeadores destino disponibles.")
 
-                    # Caso típico: el picking se generó con 1 solo picker (ej: solo P1).
-                    # Permite crear pickeadores adicionales aquí mismo, sin afectar lectura de EAN/barcodes.
+                    # Si el picking se generó con 1 solo pickeador (ej: solo P1),
+                    # permite crear pickeadores destino aquí mismo para poder repartir tareas.
                     with st.expander("➕ Crear pickeadores destino", expanded=True):
-                        current_n = len(picker_names)
-                        total_target = st.number_input(
+                        total_pickers = st.number_input(
                             "Cantidad total de pickeadores (P1..Pn)",
-                            min_value=max(2, current_n),
-                            max_value=12,
-                            value=max(2, current_n + 1),
+                            min_value=2,
+                            max_value=20,
+                            value=2,
                             step=1,
                             key="adm_create_pickers_total",
+                            help="Se crearán/asegurarán P1..Pn si no existen."
                         )
                         if st.button("Crear/asegurar pickeadores", key="adm_create_pickers_btn"):
-                            existing = set(picker_names)
-                            created = []
-                            for i in range(1, int(total_target) + 1):
+                            created = 0
+                            for i in range(1, int(total_pickers) + 1):
                                 pname = f"P{i}"
-                                if pname not in existing:
-                                    c.execute("INSERT INTO pickers (name) VALUES (?)", (pname,))
-                                    created.append(pname)
-                            conn.commit()
-                            if created:
-                                st.success("Pickeadores creados: " + ", ".join(created))
-                            else:
-                                st.info("Ya existían los pickeadores solicitados.")
+                                try:
+                                    c.execute("INSERT OR IGNORE INTO pickers (name) VALUES (?)", (pname,))
+                                    if c.rowcount and c.rowcount > 0:
+                                        created += 1
+                                except Exception:
+                                    pass
+                            try:
+                                conn.commit()
+                            except Exception:
+                                pass
+                            sfx_emit("OK")
+                            st.success(f"Listo. Pickeadores asegurados hasta P{int(total_pickers)} (nuevos: {created}).")
                             st.rerun()
                 else:
                     dests = st.multiselect("Pickeadores destino", other_picker_names, default=other_picker_names, key="adm_reassign_dests")
